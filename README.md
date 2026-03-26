@@ -15,6 +15,7 @@ Bash
 pip install -U google-generativeai tqdm chardet
 2. 配置 API Key
 在程序同级目录下创建或修改 settings.cfg 文件：
+settings.cfg.json 改为settings.cfg 更给里面的api为自己的api
 
 Ini, TOML
 [option]

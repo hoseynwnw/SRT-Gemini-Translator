@@ -17,10 +17,12 @@ pip install -U google-generativeai tqdm chardet
 在程序同级目录下创建或修改 settings.cfg 文件：
 settings.cfg.json 改为settings.cfg 更给里面的api为自己的api
 
+
 Ini, TOML
 [option]
 gemini-apikey = 你的_GEMINI_API_KEY
 target-language = Chinese
+
 3. 运行
 Bash
 python srt_translation_gemini.py your_subtitle_file.srt

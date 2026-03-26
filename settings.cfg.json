@@ -1,0 +1,9 @@
+[option]
+#API key for OpenAI API
+gemini-apikey = AIz
+
+#Target language for translation, e.g. "English", "Chinese", "Japanese"
+target-language = Chinese
+
+
+

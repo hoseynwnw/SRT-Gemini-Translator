@@ -1,28 +1,42 @@
-SRT-Gemini-Translator: 稳健的双语字幕翻译器
-简介
-这是一个基于 Google Gemini API 的 SRT 字幕翻译工具。与传统的整块翻译不同，本项目采用**“结构化索引匹配”**逻辑，彻底解决了翻译后时间轴错位、字幕丢失或格式崩坏的问题。
+# 🎬 SRT-Gemini-Translator
+### 基于 Google Gemini API 的高稳定性双语字幕翻译工具
 
-核心特性
-🎯 零错位翻译：通过将 SRT 解析为 序号:内容 的 JSON 结构，只翻译文本，回填时根据序号锁定时间轴，确保时间轴 100% 准确。
+这是一个专为“追求时间轴 100% 准确”而设计的字幕翻译脚本。它通过**结构化解耦**逻辑，彻底解决了传统 AI 翻译字幕时常见的时间轴错位、内容丢失或格式崩坏问题。
 
-恢复力强：支持断点续传。如果翻译中断，重新运行会读取本地 JSON 缓存，直接从失败处继续，不浪费 Token。
+---
 
-二次自动追补：翻译完成后会自动扫描全文，若发现 AI 漏译或格式错误导致的空缺，会自动发起二次追补请求。
+## ✨ 核心优势 (Core Features)
 
-快速开始
-1. 安装依赖
-Bash
+*   **🎯 零错位精准对齐**：将字幕拆分为“序号+内容”发给 AI，时间轴留在本地。回填时按序号入座，确保时间轴 100% 不乱。
+*   **🛡️ 断点续传机制**：自动生成本地 JSON 缓存。如果翻译中途断网或报错，重新运行会读取进度，直接从失败处继续，不浪费 Token。
+*   **🩹 自动补缺逻辑**：翻译完成后自动扫描。如果发现 AI 漏译或由于格式错误导致的缺失，会自动发起“二次追补”，保证 100% 完整度。
+*   **📊 实时进度监控**：集成 `tqdm` 动态进度条，实时显示提交次数、当前批次以及预估的 Token 消耗量。
+*   **📄 多版本输出**：一次运行自动生成“纯译文版”和“标准双语版”两个 `.srt` 文件。
+
+---
+
+## 🛠️ 工作原理 (How it Works)
+
+为了保证最强的稳定性，本工具采用了**“拆零件再组装”**的逻辑：
+
+1.  **拆分 (Dismantle)**：剥离 SRT 的时间轴，仅提取**序号**和**台词**，存入本地 `_source.json`。AI 看不到时间轴，就不会把它弄乱。
+2.  **翻译 (Translate)**：将台词以 50 句为一组发送给 Gemini，每一组翻译完立即存入 `_translated.json`。
+3.  **校验 (Check)**：全部完成后，程序会自动检查是否有序号缺失。如果有，会把缺失部分拎出来重新翻译（二次追补）。
+4.  **合成 (Merge)**：读取原 SRT 模板，将译文按序号精准回填到原时间轴下方。
+
+---
+
+## 📦 安装与使用 (Usage)
+
+### 1. 安装依赖
+确保你的电脑已安装 Python，然后运行：
+```bash
 pip install -U google-generativeai tqdm chardet
-2. 配置 API Key
-在程序同级目录下创建或修改 settings.cfg 文件：
-settings.cfg.json 改为settings.cfg 更给里面的api为自己的api
 
 
-Ini, TOML
 [option]
 gemini-apikey = 你的_GEMINI_API_KEY
 target-language = Chinese
 
-3. 运行
-Bash
-python srt_translation_gemini.py your_subtitle_file.srt
+python srt_translation_gemini.py 你的文件名.srt
+

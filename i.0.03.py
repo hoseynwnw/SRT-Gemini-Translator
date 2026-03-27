@@ -1,4 +1,4 @@
-# Version: 0.1.0
+# Version: 0.1.1
 # -*- coding: utf-8 -*-
 import re
 from google import genai
@@ -171,8 +171,10 @@ if os.path.exists(trans_json):
 
 undone = [k for k in all_indices if k not in trans_dict or not trans_dict[k] or "[FIXME]" in str(trans_dict[k])]
 
+# 设置主批次大小
+batch_size = 40 
+
 if undone:
-    batch_size = 40 
     pbar = tqdm(range(0, len(undone), batch_size), desc="🚀 正在初翻")
     for i in pbar:
         batch_keys = undone[i : i + batch_size]
@@ -186,8 +188,9 @@ if undone:
 # --- 5. 补译逻辑：集中解决所有遗漏 ---
 final_missing = [k for k in all_indices if k not in trans_dict or not trans_dict[k] or "[FIXME]" in str(trans_dict[k])]
 if final_missing:
-    repair_batch_size = 5
-    print(f"\n🔍 发现 {len(final_missing)} 条缺失，正在进行最终补译...")
+    # 动态设置补译批次大小为 batch_size 的 0.5 倍
+    repair_batch_size = max(1, int(batch_size * 0.5))
+    print(f"\n🔍 发现 {len(final_missing)} 条缺失，正在进行最终补译 (当前补译批次: {repair_batch_size})...")
     
     repair_pbar = tqdm(range(0, len(final_missing), repair_batch_size), desc="🛠️ 补救中")
     for i in repair_pbar:

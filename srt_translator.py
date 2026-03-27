@@ -13,7 +13,7 @@ import time
 def get_config():
     if not os.path.exists('settings.cfg'):
         with open('settings.cfg', 'w', encoding='utf-8') as f:
-            f.write("[option]\ngemini-apikey = YOUR_API_KEY\ntarget-language = Chinese")
+            f.write("[option]\ngemini-apikey = YOUR_API_KEY\ngemini-apikey-srt1 = YOUR_API_KEY_1\ngemini-apikey-srt2 = YOUR_API_KEY_2\ngemini-apikey-srt3 = YOUR_API_KEY_3\ntarget-language = Chinese")
         print("已生成 settings.cfg，请填写 API Key 后运行。")
         exit()
         
@@ -23,18 +23,43 @@ def get_config():
     
     config = configparser.ConfigParser()
     config.read('settings.cfg', encoding=enc)
-    return config.get('option', 'gemini-apikey-srt1'), config.get('option', 'target-language')
+    
+    # 动态获取 settings.cfg 中定义的多个 Key
+    key_fields = ['gemini-apikey', 'gemini-apikey-srt1', 'gemini-apikey-srt2', 'gemini-apikey-srt3']
+    keys = []
+    for field in key_fields:
+        val = config.get('option', field, fallback=None)
+        if val and "YOUR_API_KEY" not in val and not val.startswith('#'):
+            keys.append(val)
+    
+    if not keys:
+        print("未在 settings.cfg 中找到任何有效的 API Key。")
+        exit()
+        
+    return keys, config.get('option', 'target-language')
 
-gemini_key, target_lang = get_config()
-client = genai.Client(api_key=gemini_key)
-# 建议使用稳定版本 gemini-1.5-flash 以获得更好的格式遵循能力
-MODEL_ID = "gemini-3.1-flash-lite-preview" 
+# 获取 Key 列表并初始化
+api_keys, target_lang = get_config()
+current_key_index = 0
+client = genai.Client(api_key=api_keys[current_key_index])
+MODEL_ID = "gemini-3.1-flash-lite-preview" # 建议使用稳定版本
+
+def switch_api_key():
+    """检测到限制时，自动切换到下一个 Key"""
+    global client, current_key_index
+    if len(api_keys) <= 1:
+        return False
+    
+    current_key_index = (current_key_index + 1) % len(api_keys)
+    new_key = api_keys[current_key_index]
+    client = genai.Client(api_key=new_key)
+    print(f"\n🔄 当前 Key 额度耗尽或受限，已切换至 Key #{current_key_index + 1}")
+    return True
 
 parser = argparse.ArgumentParser()
 parser.add_argument("filename", help="SRT 字幕文件路径")
 args = parser.parse_args()
 
-# 清理路径中的引号
 clean_path = args.filename.strip("'").strip('"')
 base_name = os.path.splitext(clean_path)[0]
 source_json = f"{base_name}_source.json"      
@@ -51,7 +76,6 @@ def prepare_data(srt_path):
     with open(srt_path, 'r', encoding=enc) as f:
         content = f.read()
     
-    # 使用正则表达式分割字幕块，处理不同系统的换行符
     blocks = re.split(r'\n\s*\n', content.strip())
     src_dict, full_blocks = {}, {} 
     
@@ -59,7 +83,6 @@ def prepare_data(srt_path):
         lines = block.split('\n')
         if len(lines) >= 3:
             idx = lines[0].strip()
-            # 合并可能存在的多行文本
             text = " ".join(lines[2:]).strip()
             src_dict[idx] = text
             full_blocks[idx] = lines
@@ -70,23 +93,15 @@ def prepare_data(srt_path):
 
 # --- 3. 翻译核心逻辑 ---
 LAST_REQUEST_TIME = 0
-RPM_INTERVAL = 1.5 # 对应约 40 RPM，免费版建议设为 3-4
+RPM_INTERVAL = 1.0 
 
 def translate_batch(batch_dict, is_retry=False):
-    global LAST_REQUEST_TIME
+    global LAST_REQUEST_TIME, client
     if not batch_dict: return {}
     
-    # 频率限制
-    elapsed = time.time() - LAST_REQUEST_TIME
-    if elapsed < RPM_INTERVAL:
-        time.sleep(RPM_INTERVAL - elapsed)
-
-    # 构造更清晰的输入格式
     input_text = "\n".join([f"ID_{k}: {v}" for k, v in batch_dict.items()])
-
-    # 强化 Prompt：明确要求即便句子简短也必须翻译，严禁合并
     prompt = (
-        f"You are a professional translator. Translate these subtitle lines into {target_lang}.\n"
+         f"You are a professional translator. Translate these subtitle lines into {target_lang}.\n"
         f"CONTEXT: Academic history/education lecture.\n\n"
         f"RULES:\n"
         f"1. FORMAT: 'ID ||| Translation'. Example: '1060 ||| 这里的翻译内容'.\n"
@@ -97,11 +112,16 @@ def translate_batch(batch_dict, is_retry=False):
         f"{input_text}"
     )
     
-    # 如果是补译阶段，增加温度以获取不同结果
     temp = 0.4 if is_retry else 0.1
+    # 最大尝试次数设为 Key 数量的两倍，确保每个 Key 都有机会尝试
+    max_total_attempts = len(api_keys) * 2 
     
-    for attempt in range(3):
+    for attempt in range(max_total_attempts):
         try:
+            elapsed = time.time() - LAST_REQUEST_TIME
+            if elapsed < RPM_INTERVAL:
+                time.sleep(RPM_INTERVAL - elapsed)
+
             LAST_REQUEST_TIME = time.time()
             response = client.models.generate_content(
                 model=MODEL_ID, 
@@ -116,67 +136,64 @@ def translate_batch(batch_dict, is_retry=False):
             for line in lines:
                 if "|||" in line:
                     parts = line.split("|||", 1)
-                    # 稳健提取数字 ID
                     idx_match = re.search(r'\d+', parts[0])
                     if idx_match:
                         idx_str = idx_match.group()
                         if idx_str in batch_dict:
                             res[idx_str] = parts[1].strip()
 
-            # 检查是否全部翻译完成
             if len(res) >= len(batch_dict):
                 return res
             else:
-                print(f"警告：批次缺失 {len(batch_dict)-len(res)} 行，重试中 (尝试 {attempt+1}/3)...")
-                time.sleep(2 * (attempt + 1))
+                print(f"警告：翻译缺失，重试中 ({attempt+1}/{max_total_attempts})...")
+                time.sleep(1)
                 
         except Exception as e:
-            if "429" in str(e):
-                print("达到频率限制，休眠 15 秒...")
-                time.sleep(15)
+            err_str = str(e).upper()
+            # 捕获 429 (频率限制) 或 QUOTA_EXCEEDED (配额用尽)
+            if "429" in err_str or "QUOTA" in err_str or "LIMIT" in err_str:
+                if switch_api_key():
+                    time.sleep(1) 
+                    continue
+                else:
+                    print("所有 API Key 均已达到限制，休眠 30 秒...")
+                    time.sleep(30)
             else:
                 print(f"API 异常: {e}")
                 time.sleep(2)
                 
-    return res
+    return {}
 
 # --- 4. 执行翻译流程 ---
 src_dict, full_blocks, all_indices = prepare_data(clean_path)
 trans_dict = {}
 
-# 加载已有的翻译（如果有）
 if os.path.exists(trans_json):
     with open(trans_json, 'r', encoding='utf-8') as f:
         trans_dict = json.load(f)
 
-# 第一轮：翻译未完成或被标记为 FIXME 的行
 undone = [k for k in all_indices if k not in trans_dict or not trans_dict[k] or "[FIXME]" in str(trans_dict[k])]
 
 if undone:
-    batch_size = 50 # 较小的批次更稳健
+    batch_size = 50 
     pbar = tqdm(range(0, len(undone), batch_size), desc="🚀 正在翻译")
     for i in pbar:
         batch_keys = undone[i : i + batch_size]
         result = translate_batch({k: src_dict[k] for k in batch_keys})
         trans_dict.update(result)
-        # 实时保存，防止崩溃丢失进度
         with open(trans_json, 'w', encoding='utf-8') as f:
             json.dump(trans_dict, f, ensure_ascii=False, indent=4)
     pbar.close()
 
-# 第二轮：深度补译（针对顽固的 FIXME 或者是漏译行）
 final_missing = [k for k in all_indices if k not in trans_dict or not trans_dict[k] or "[FIXME]" in str(trans_dict[k])]
 if final_missing:
-    print(f"\n🔍 正在进行深度补译 (处理 {len(final_missing)} 条顽固项)...")
-    # 补译采用单条处理模式，确保 100% 成功率
+    print(f"\n🔍 正在补译 {len(final_missing)} 条...")
     for k in tqdm(final_missing):
         result = translate_batch({k: src_dict[k]}, is_retry=True)
         if result and k in result:
             trans_dict[k] = result[k]
         else:
-            # 如果单条都失败，记录原文以便后续手动检查
             trans_dict[k] = f"[FIXME] {src_dict[k]}"
-        
         with open(trans_json, 'w', encoding='utf-8') as f:
             json.dump(trans_dict, f, ensure_ascii=False, indent=4)
 
@@ -185,13 +202,9 @@ bilingual_res, chinese_res = [], []
 for idx in all_indices:
     t_range = full_blocks[idx][1]
     orig = src_dict[idx]
-    # 最终检查，如果没有翻译则显示原文
     trans = trans_dict.get(idx) or f"[FIXME] {orig}"
-
     bilingual_res.append(f"{idx}\n{t_range}\n{orig}\n{trans}\n")
     chinese_res.append(f"{idx}\n{t_range}\n{trans}\n")
-
-# ... 之前的导出逻辑 ...
 
 with open(f"{base_name}_dual.srt", 'w', encoding='utf-8') as f:
     f.write("\n".join(bilingual_res))
@@ -199,14 +212,6 @@ with open(f"{base_name}_chinese.srt", 'w', encoding='utf-8') as f:
     f.write("\n".join(chinese_res))
 
 print(f"\n✅ 字幕生成成功！")
-print(f"双语字幕: {base_name}_dual.srt")
-print(f"中文字幕: {base_name}_chinese.srt")
-
-# --- 新增：清理临时 JSON ---
-print(f"\n正在清理临时缓存...")
-for temp_file in [source_json, trans_json]:
-    if os.path.exists(temp_file):
-        os.remove(temp_file)
-        print(f"已清理: {temp_file}")
-
-print(f"✨ 全部流程处理完毕。")
+if os.path.exists(source_json): os.remove(source_json)
+if os.path.exists(trans_json): os.remove(trans_json)
+print(f"✨ 处理完毕。")

@@ -1,4 +1,4 @@
-# Version: 0.1.3
+# Version: 0.1.5
 # -*- coding: utf-8 -*-
 import re
 from google import genai
@@ -9,6 +9,7 @@ import json
 import chardet
 import argparse
 import time
+import concurrent.futures
 
 # --- 1. 配置与初始化 ---
 def get_config():
@@ -99,7 +100,18 @@ def prepare_data(srt_path):
 
 # --- 3. 翻译核心逻辑 ---
 LAST_REQUEST_TIME = 0
-RPM_INTERVAL = 1.0 
+RPM_INTERVAL = 0.8 
+
+def _raw_api_call(prompt, is_repair_mode):
+    """纯粹的 API 调用，在子线程中运行"""
+    return client.models.generate_content(
+        model=MODEL_ID, 
+        contents=prompt,
+        config={
+            'temperature': 0.2 if is_repair_mode else 0.1, 
+            'max_output_tokens': 2048
+        }
+    )
 
 def translate_batch(batch_dict, is_repair_mode=False):
     global LAST_REQUEST_TIME, client
@@ -113,8 +125,7 @@ def translate_batch(batch_dict, is_repair_mode=False):
         f"SOURCE:\n{input_text}"
     )
     
-    # 恢复较少的重试次数，避免网络差时长时间挂起
-    max_attempts = 3 if is_repair_mode else 1
+    max_attempts = 3 if is_repair_mode else 2
     
     for attempt in range(max_attempts):
         try:
@@ -124,16 +135,15 @@ def translate_batch(batch_dict, is_repair_mode=False):
 
             LAST_REQUEST_TIME = time.time()
             
-            # 移除 http_options 强制超时，回归稳定调用
-            response = client.models.generate_content(
-                model=MODEL_ID, 
-                contents=prompt,
-                config={
-                    'temperature': 0.2 if is_repair_mode else 0.1, 
-                    'max_output_tokens': 2048
-                }
-            )
-            
+            # Windows 兼容的超时监控逻辑
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_raw_api_call, prompt, is_repair_mode)
+                try:
+                    # 如果 40 秒没拿回结果，就认为网络死掉了
+                    response = future.result(timeout=40) 
+                except concurrent.futures.TimeoutError:
+                    raise Exception("WIN_TIMEOUT: 网络响应太慢，已强制断开重试")
+
             res = {}
             raw_text = response.text.replace('```', '').strip()
             lines = raw_text.split('\n')
@@ -149,23 +159,24 @@ def translate_batch(batch_dict, is_repair_mode=False):
 
             if res:
                 if len(res) < len(batch_dict) and not is_repair_mode:
-                    print(f"\n📢 提示：收到 {len(res)}/{len(batch_dict)} 条，其余缺失项将在最后统一补译。")
+                    print(f"\n📢 提示：收到 {len(res)}/{len(batch_dict)} 条，缺失项将在补译环节处理。")
                 return res
             else:
                 if is_repair_mode:
-                    print(f"警告：AI 未返回有效译文，重试中 ({attempt+1}/{max_attempts})...")
+                    print(f"警告：AI 返回为空，正在进行第 {attempt+1} 次重试...")
 
         except Exception as e:
             err_str = str(e).upper()
-            if any(x in err_str for x in ["429", "QUOTA", "LIMIT", "SSL", "EOF", "DISCONNECTED", "TIMEOUT"]):
+            # 针对 Windows 网络波动和 API 限制的综合判断
+            if any(x in err_str for x in ["TIMEOUT", "DEADLINE", "SSL", "429", "QUOTA", "EOF", "DISCONNECTED"]):
                 if switch_api_key(reason=str(e)):
                     continue
-            print(f"\nAPI 异常 (重试中): {e}")
-            time.sleep(1)
+            print(f"\nAPI 异常: {e}")
+            time.sleep(2)
                 
     return {}
 
-# --- 4. 执行翻译流程 ---
+# --- 4. 执行流程 ---
 src_dict, full_blocks, all_indices = prepare_data(clean_path)
 trans_dict = {}
 
@@ -175,7 +186,6 @@ if os.path.exists(trans_json):
 
 undone = [k for k in all_indices if k not in trans_dict or not trans_dict[k] or "[FIXME]" in str(trans_dict[k])]
 
-# 设置主批次大小
 batch_size = 40 
 
 if undone:
@@ -183,18 +193,16 @@ if undone:
     for i in pbar:
         batch_keys = undone[i : i + batch_size]
         result = translate_batch({k: src_dict[k] for k in batch_keys}, is_repair_mode=False)
-        # 拿到多少更新多少，缺失项留给补译
         trans_dict.update(result)
         with open(trans_json, 'w', encoding='utf-8') as f:
             json.dump(trans_dict, f, ensure_ascii=False, indent=4)
     pbar.close()
 
-# --- 5. 补译逻辑：集中解决所有遗漏 ---
+# --- 5. 补译环节 ---
 final_missing = [k for k in all_indices if k not in trans_dict or not trans_dict[k] or "[FIXME]" in str(trans_dict[k])]
 if final_missing:
-    # 动态设置补译批次大小
     repair_batch_size = max(1, int(batch_size * 0.5))
-    print(f"\n🔍 发现 {len(final_missing)} 条缺失，正在进行最终补译 (当前补译批次: {repair_batch_size})...")
+    print(f"\n🔍 发现 {len(final_missing)} 条缺失，启动最终补译 (Batch: {repair_batch_size})...")
     
     repair_pbar = tqdm(range(0, len(final_missing), repair_batch_size), desc="🛠️ 补救中")
     for i in repair_pbar:
@@ -212,7 +220,7 @@ if final_missing:
             json.dump(trans_dict, f, ensure_ascii=False, indent=4)
     repair_pbar.close()
 
-# --- 6. 导出结果文件 ---
+# --- 6. 导出文件 ---
 bilingual_res, chinese_res = [], []
 for idx in all_indices:
     t_range = full_blocks[idx][1]
@@ -227,11 +235,6 @@ with open(f"{base_name}_dual.srt", 'w', encoding='utf-8') as f:
 with open(f"{base_name}_chinese.srt", 'w', encoding='utf-8') as f:
     f.write("\n".join(chinese_res))
 
-print(f"\n✅ 字幕生成成功！")
-print(f"双语字幕: {base_name}_dual.srt")
-print(f"中文字幕: {base_name}_chinese.srt")
-
+print(f"\n✅ 字幕处理完成！")
 if os.path.exists(source_json): os.remove(source_json)
 if os.path.exists(trans_json): os.remove(trans_json)
-
-print(f"✨ 全部流程处理完毕。")

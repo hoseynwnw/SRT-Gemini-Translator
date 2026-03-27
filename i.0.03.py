@@ -1,4 +1,4 @@
-# Version: 0.1.1
+# Version: 0.1.2
 # -*- coding: utf-8 -*-
 import re
 from google import genai
@@ -113,8 +113,8 @@ def translate_batch(batch_dict, is_repair_mode=False):
         f"SOURCE:\n{input_text}"
     )
     
-    # 初翻模式只试 1 次，缺失也不重试；补译模式试 3 次
-    max_attempts = 3 if is_repair_mode else 1
+    # 增加重试次数以应对假死切换
+    max_attempts = 5 if is_repair_mode else 2
     
     for attempt in range(max_attempts):
         try:
@@ -123,10 +123,16 @@ def translate_batch(batch_dict, is_repair_mode=False):
                 time.sleep(RPM_INTERVAL - elapsed)
 
             LAST_REQUEST_TIME = time.time()
+            
+            # 使用 http_options 设置超时，防止无限期卡住进度条
             response = client.models.generate_content(
                 model=MODEL_ID, 
                 contents=prompt,
-                config={'temperature': 0.2 if is_repair_mode else 0.1, 'max_output_tokens': 2048}
+                config={
+                    'temperature': 0.2 if is_repair_mode else 0.1, 
+                    'max_output_tokens': 2048,
+                    'http_options': {'timeout': 60} # 60秒超时强制断开
+                }
             )
             
             res = {}
@@ -142,7 +148,6 @@ def translate_batch(batch_dict, is_repair_mode=False):
                         if idx_str in batch_dict:
                             res[idx_str] = parts[1].strip()
 
-            # 只要拿到了部分结果，就直接返回，不再原地死磕
             if res:
                 if len(res) < len(batch_dict) and not is_repair_mode:
                     print(f"\n📢 提示：收到 {len(res)}/{len(batch_dict)} 条，其余缺失项将在最后统一补译。")
@@ -153,11 +158,12 @@ def translate_batch(batch_dict, is_repair_mode=False):
 
         except Exception as e:
             err_str = str(e).upper()
-            if any(x in err_str for x in ["429", "QUOTA", "LIMIT", "SSL", "EOF", "DISCONNECTED", "TIMEOUT"]):
-                if switch_api_key(reason=str(e)):
+            # 如果是超时或连接问题，立即切换 Key
+            if any(x in err_str for x in ["TIMEOUT", "DEADLINE", "EOF", "DISCONNECTED", "SSL", "429"]):
+                if switch_api_key(reason=f"网络响应超时或异常: {e}"):
                     continue
-            print(f"API 异常: {e}")
-            time.sleep(1)
+            print(f"\nAPI 异常 (重试中): {e}")
+            time.sleep(2)
                 
     return {}
 
@@ -179,7 +185,6 @@ if undone:
     for i in pbar:
         batch_keys = undone[i : i + batch_size]
         result = translate_batch({k: src_dict[k] for k in batch_keys}, is_repair_mode=False)
-        # 拿到多少更新多少，缺失的部分在 trans_dict 里依然是空，会被存入 json
         trans_dict.update(result)
         with open(trans_json, 'w', encoding='utf-8') as f:
             json.dump(trans_dict, f, ensure_ascii=False, indent=4)
@@ -188,7 +193,7 @@ if undone:
 # --- 5. 补译逻辑：集中解决所有遗漏 ---
 final_missing = [k for k in all_indices if k not in trans_dict or not trans_dict[k] or "[FIXME]" in str(trans_dict[k])]
 if final_missing:
-    # 动态设置补译批次大小为 batch_size 的 0.5 倍
+    # 动态设置补译批次大小
     repair_batch_size = max(1, int(batch_size * 0.5))
     print(f"\n🔍 发现 {len(final_missing)} 条缺失，正在进行最终补译 (当前补译批次: {repair_batch_size})...")
     
@@ -201,7 +206,6 @@ if final_missing:
             if k in result:
                 trans_dict[k] = result[k]
             else:
-                # 如果补译阶段还是拿不到，标记 FIXME 避免再次运行卡住
                 if k not in trans_dict or not trans_dict[k]:
                     trans_dict[k] = f"[FIXME] {src_dict[k]}"
                 

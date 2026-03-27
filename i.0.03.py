@@ -1,4 +1,4 @@
-# Version: 0.1.2
+# Version: 0.1.3
 # -*- coding: utf-8 -*-
 import re
 from google import genai
@@ -113,8 +113,8 @@ def translate_batch(batch_dict, is_repair_mode=False):
         f"SOURCE:\n{input_text}"
     )
     
-    # 增加重试次数以应对假死切换
-    max_attempts = 5 if is_repair_mode else 2
+    # 恢复较少的重试次数，避免网络差时长时间挂起
+    max_attempts = 3 if is_repair_mode else 1
     
     for attempt in range(max_attempts):
         try:
@@ -124,14 +124,13 @@ def translate_batch(batch_dict, is_repair_mode=False):
 
             LAST_REQUEST_TIME = time.time()
             
-            # 使用 http_options 设置超时，防止无限期卡住进度条
+            # 移除 http_options 强制超时，回归稳定调用
             response = client.models.generate_content(
                 model=MODEL_ID, 
                 contents=prompt,
                 config={
                     'temperature': 0.2 if is_repair_mode else 0.1, 
-                    'max_output_tokens': 2048,
-                    'http_options': {'timeout': 60} # 60秒超时强制断开
+                    'max_output_tokens': 2048
                 }
             )
             
@@ -158,12 +157,11 @@ def translate_batch(batch_dict, is_repair_mode=False):
 
         except Exception as e:
             err_str = str(e).upper()
-            # 如果是超时或连接问题，立即切换 Key
-            if any(x in err_str for x in ["TIMEOUT", "DEADLINE", "EOF", "DISCONNECTED", "SSL", "429"]):
-                if switch_api_key(reason=f"网络响应超时或异常: {e}"):
+            if any(x in err_str for x in ["429", "QUOTA", "LIMIT", "SSL", "EOF", "DISCONNECTED", "TIMEOUT"]):
+                if switch_api_key(reason=str(e)):
                     continue
             print(f"\nAPI 异常 (重试中): {e}")
-            time.sleep(2)
+            time.sleep(1)
                 
     return {}
 
@@ -185,6 +183,7 @@ if undone:
     for i in pbar:
         batch_keys = undone[i : i + batch_size]
         result = translate_batch({k: src_dict[k] for k in batch_keys}, is_repair_mode=False)
+        # 拿到多少更新多少，缺失项留给补译
         trans_dict.update(result)
         with open(trans_json, 'w', encoding='utf-8') as f:
             json.dump(trans_dict, f, ensure_ascii=False, indent=4)

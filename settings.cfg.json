@@ -1,9 +1,21 @@
 [option]
 #API key for OpenAI API
-gemini-apikey = AIz
+#srt0
+gemini-apikey = 
+#srt1
+gemini-apikey-srt1 = AIzaSyAH 
+#免费
+gemini-apikey-srt2 = AIzaSyBl2Bmu3 
+#免费
+gemini-apikey-srt3 = AIzaSyCXZcR 
+
+#免费
+gemini-apikey-srt4 = AIzaSyBcZyY 
+
+#付费api
+#gemini-apikey = AIzaSyBu 
 
 #Target language for translation, e.g. "English", "Chinese", "Japanese"
 target-language = Chinese
 
-
-
+model = gemini-3.1-flash-lite-preview
